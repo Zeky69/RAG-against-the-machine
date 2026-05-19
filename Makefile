@@ -11,7 +11,7 @@ evaluate:
 		--k 10 --max_context_length 2000 --threshold 0.50
 
 index:
-	uv run python -m src index data/raw/vllm-0.10.1
+	uv run python -m student index data/raw/vllm-0.10.1
 
 install:
 	uv sync
