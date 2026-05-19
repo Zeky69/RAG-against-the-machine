@@ -8,8 +8,8 @@ from .models import MinimalSource
 
 MODEL_REPO = "Qwen/Qwen3-0.6B-GGUF"
 MODEL_FILE = "*.gguf"
-MAX_NEW_TOKENS = 128
-N_CTX = 1024
+MAX_NEW_TOKENS = 200
+N_CTX = 4096
 
 
 class Generator:
@@ -70,23 +70,25 @@ class Generator:
 
 		context = "\n\n---\n\n".join(context_parts)
 
-		response = self._llm.create_chat_completion(
-			messages=[
-				{
-					"role": "system",
-					"content": (
-						"/no_think\n"
-						"Using only the context below, answer the question concisely. "
-						"2-3 sentences or less is ideal.\n\n"
-						f"Context:\n{context}"
-					),
-				},
-				{"role": "user", "content": question},
-			],
+		system_prompt = (
+			"Answer the question concisely in 1-3 sentences using only the "
+			"following context. Cite the specific name, command, value, or "
+			"identifier from the context that answers the question; do not "
+			"merely restate the question.\n\n"
+			f"Context:\n{context}"
+		)
+		# Pre-fill an empty <think> block so Qwen3 skips its reasoning phase
+		prompt = (
+			f"<|im_start|>system\n{system_prompt}<|im_end|>\n"
+			f"<|im_start|>user\n{question}<|im_end|>\n"
+			f"<|im_start|>assistant\n<think>\n\n</think>\n"
+		)
+
+		response = self._llm.create_completion(
+			prompt=prompt,
 			max_tokens=MAX_NEW_TOKENS,
 			temperature=0.0,
+			stop=["<|im_end|>"],
 		)
-		answer = response["choices"][0]["message"]["content"]
-		if "</think>" in answer:
-			answer = answer.split("</think>", 1)[1]
+		answer = response["choices"][0]["text"]
 		return answer.strip()

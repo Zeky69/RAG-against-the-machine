@@ -1,6 +1,7 @@
 import json
+from functools import lru_cache
 from pathlib import Path
-from typing import List
+from typing import List, Tuple
 
 import bm25s
 
@@ -8,6 +9,7 @@ from .models import MinimalSource
 
 CHUNKS_META = Path("data/processed/chunks/chunks_meta.json")
 INDEX_PATH = Path("data/processed/bm25_index")
+QUERY_CACHE_SIZE = 256
 
 
 class Retriever:
@@ -16,12 +18,21 @@ class Retriever:
         self._retriever = bm25s.BM25.load(str(INDEX_PATH), load_corpus=False)
         with open(CHUNKS_META) as fp:
             self._meta = json.load(fp)
+        self._cached_search = lru_cache(maxsize=QUERY_CACHE_SIZE)(self._search_raw)
+
+    def _search_raw(self, query: str, k: int) -> Tuple[Tuple[int, ...], ...]:
+        tokens = bm25s.tokenize([query], show_progress=False)
+        results, _ = self._retriever.retrieve(
+            tokens, k=min(k, len(self._meta)), show_progress=False
+        )
+        return (tuple(results[0]),)
 
     def search(self, query: str, k: int = 10) -> List[MinimalSource]:
-        tokens = bm25s.tokenize([query])
-        results, _ = self._retriever.retrieve(tokens, k=min(k, len(self._meta)))
+        if k <= 0 or not query.strip():
+            return []
+        (indices,) = self._cached_search(query, k)
         sources: List[MinimalSource] = []
-        for idx in results[0]:
+        for idx in indices:
             meta = self._meta[idx]
             sources.append(
                 MinimalSource(

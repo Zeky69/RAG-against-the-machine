@@ -8,7 +8,7 @@ from tqdm import tqdm
 from pathlib import Path
 
 class RAGSystem:
-	def index(self, repo_path: str, max_chunk_size: int = 2000):
+	def index(self, repo_path: str = "data/raw/vllm-0.10.1", max_chunk_size: int = 2000):
 		build_index(repo_path=repo_path, max_chunk_size=max_chunk_size)
 		
 	def search(self, query: str, k: int = 10):
@@ -16,8 +16,16 @@ class RAGSystem:
 		return retriever.search(query=query, k=k)
 
 	def search_dataset(self, dataset_path: str, k: int = 10, save_directory: str = "data/output/search_results"):
+		path = Path(dataset_path)
+		if not path.is_file():
+			print(f"Error: dataset file not found: {dataset_path}")
+			return
+		try:
+			dataset = RagDataset.model_validate_json(path.read_text())
+		except Exception as e:
+			print(f"Error: failed to parse dataset {dataset_path}: {e}")
+			return
 		retriever = Retriever()
-		dataset = RagDataset.model_validate_json(Path(dataset_path).read_text())
 		results: List[MinimalSearchResults] = []
 		for q in tqdm(dataset.rag_questions, desc="Searching"):
 			sources = retriever.search(query=q.question, k=k)

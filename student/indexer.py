@@ -36,7 +36,7 @@ def build_index(repo_path: str, max_chunk_size: int = 2000) -> None:
         json.dump(meta, fp)
 
     corpus = [c.content for c in all_chunks]
-    tokenized = bm25s.tokenize(corpus)
+    tokenized = bm25s.tokenize(corpus, show_progress=False)
     retriever = bm25s.BM25()
     retriever.index(tokenized)
     retriever.save(str(INDEX_PATH))
