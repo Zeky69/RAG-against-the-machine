@@ -13,6 +13,7 @@ dependencies = [
     "llama-cpp-python>=0.3.2",
     "mypy>=2.1.0",
     "pydantic>=2.13.4",
+    "sentence-transformers>=5.5.0",
     "torch>=2.12.0",
     "tqdm>=4.67.3",
     "transformers>=5.8.1",
@@ -25,3 +26,20 @@ torch = { index = "pytorch-cpu" }
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
+
+[tool.mypy]
+files = ["student"]
+mypy_path = "stubs"
+exclude = [
+    "\\.venv/",
+    "data/",
+    "evaluations/",
+    "exams/",
+    "moulinette.*",
+    "build/",
+]
+
+[dependency-groups]
+dev = [
+    "types-tqdm>=4.67.3.20260518",
+]

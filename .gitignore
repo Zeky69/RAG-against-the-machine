@@ -13,3 +13,5 @@ datasets*
 ex*
 output
 processed
+evaluations
+.mypy_cache/

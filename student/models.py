@@ -1,5 +1,6 @@
 import uuid
-from typing import List, Union
+from typing import Generic, List, TypeVar, Union
+
 from pydantic import BaseModel, Field
 
 
@@ -33,10 +34,17 @@ class MinimalAnswer(MinimalSearchResults):
     answer: str
 
 
-class StudentSearchResults(BaseModel):
-    search_results: List[MinimalSearchResults]
+ResultT = TypeVar("ResultT", bound=MinimalSearchResults)
+
+
+class _SearchResultsBase(BaseModel, Generic[ResultT]):
+    search_results: List[ResultT]
     k: int
 
 
-class StudentSearchResultsAndAnswer(StudentSearchResults):
-    search_results: List[MinimalAnswer]
+class StudentSearchResults(_SearchResultsBase[MinimalSearchResults]):
+    pass
+
+
+class StudentSearchResultsAndAnswer(_SearchResultsBase[MinimalAnswer]):
+    pass

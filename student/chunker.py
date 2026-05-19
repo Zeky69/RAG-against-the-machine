@@ -19,19 +19,27 @@ def _build_offsets(content: str) -> List[int]:
     return offsets
 
 
-def _node_span(node: ast.AST, offsets: List[int], content_len: int) -> Tuple[int, int]:
-    # Include decorator if present (decorators start before the def/class line)
-    if hasattr(node, "decorator_list") and node.decorator_list:
-        first_line = node.decorator_list[0].lineno
+def _node_span(
+    node: ast.stmt,
+    offsets: List[int],
+    content_len: int,
+) -> Tuple[int, int]:
+    decorators = getattr(node, "decorator_list", None)
+    if decorators:
+        first_line = decorators[0].lineno
     else:
         first_line = node.lineno
     start = offsets[first_line - 1]
-    end_line = getattr(node, "end_lineno", node.lineno) or node.lineno
+    end_line = node.end_lineno or node.lineno
     end = offsets[min(end_line, len(offsets) - 1)]
     return start, min(end, content_len)
 
 
-def _raw_chunks(file_path: str, text: str, offset: int, max_size: int) -> List[Chunk]:
+def _raw_chunks(
+        file_path: str,
+        text: str,
+        offset: int,
+        max_size: int) -> List[Chunk]:
     result = []
     for i in range(0, len(text), max_size):
         sub = text[i:i + max_size]
@@ -48,11 +56,12 @@ def chunk_python(file_path: str, content: str, max_size: int) -> List[Chunk]:
     offsets = _build_offsets(content)
     content_len = len(content)
 
-    def span(node: ast.AST) -> Tuple[int, int]:
+    def span(node: ast.stmt) -> Tuple[int, int]:
         return _node_span(node, offsets, content_len)
 
     chunks: List[Chunk] = []
-    # Accumulate consecutive non-def module-level nodes (imports, constants, etc.)
+    # Accumulate consecutive non-def module-level nodes (imports, constants,
+    # etc.)
     prose_start: Optional[int] = None
     prose_end: int = 0
 
@@ -61,7 +70,12 @@ def chunk_python(file_path: str, content: str, max_size: int) -> List[Chunk]:
         if prose_start is not None and prose_end > prose_start:
             text = content[prose_start:prose_end]
             if text.strip():
-                chunks.extend(_raw_chunks(file_path, text, prose_start, max_size))
+                chunks.extend(
+                    _raw_chunks(
+                        file_path,
+                        text,
+                        prose_start,
+                        max_size))
         prose_start = None
         prose_end = 0
 
@@ -77,7 +91,11 @@ def chunk_python(file_path: str, content: str, max_size: int) -> List[Chunk]:
     for node in tree.body:
         start, end = span(node)
 
-        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        if not isinstance(
+            node,
+            (ast.FunctionDef,
+             ast.AsyncFunctionDef,
+             ast.ClassDef)):
             # Module-level code: accumulate into a prose block
             if prose_start is None:
                 prose_start = start
@@ -91,7 +109,8 @@ def chunk_python(file_path: str, content: str, max_size: int) -> List[Chunk]:
             if node_text.strip():
                 chunks.append(Chunk(file_path, start, end, node_text))
         elif isinstance(node, ast.ClassDef):
-            # Class too large: keep class header + each method as separate chunks
+            # Class too large: keep class header + each method as separate
+            # chunks
             methods = [
                 span(child)
                 for child in node.body
@@ -103,8 +122,14 @@ def chunk_python(file_path: str, content: str, max_size: int) -> List[Chunk]:
                 for ms, me in methods:
                     add_def(ms, me)
             else:
-                # No methods (e.g. dataclass with only fields): split as raw text
-                chunks.extend(_raw_chunks(file_path, node_text, start, max_size))
+                # No methods (e.g. dataclass with only fields): split as raw
+                # text
+                chunks.extend(
+                    _raw_chunks(
+                        file_path,
+                        node_text,
+                        start,
+                        max_size))
         else:
             # Large standalone function: split as raw text
             chunks.extend(_raw_chunks(file_path, node_text, start, max_size))
@@ -123,14 +148,28 @@ def chunk_text(file_path: str, content: str, max_size: int) -> List[Chunk]:
 
     for para in paragraphs:
         if current and len(current) + 2 + len(para) > max_size:
-            chunks.append(Chunk(file_path, current_start, current_start + len(current), current))
+            chunks.append(
+                Chunk(
+                    file_path,
+                    current_start,
+                    current_start +
+                    len(current),
+                    current))
             current_start = offset
             current = ""
 
         if not current and len(para) > max_size:
             for i in range(0, len(para), max_size):
                 sub = para[i:i + max_size]
-                chunks.append(Chunk(file_path, offset + i, offset + i + len(sub), sub))
+                chunks.append(
+                    Chunk(
+                        file_path,
+                        offset +
+                        i,
+                        offset +
+                        i +
+                        len(sub),
+                        sub))
             current_start = offset + len(para) + 2
         else:
             current += ("\n\n" if current else "") + para
@@ -138,7 +177,13 @@ def chunk_text(file_path: str, content: str, max_size: int) -> List[Chunk]:
         offset += len(para) + 2
 
     if current:
-        chunks.append(Chunk(file_path, current_start, current_start + len(current), current))
+        chunks.append(
+            Chunk(
+                file_path,
+                current_start,
+                current_start +
+                len(current),
+                current))
     return chunks
 
 
