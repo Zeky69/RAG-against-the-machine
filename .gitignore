@@ -1,0 +1,15 @@
+*.lock
+
+__pycache__/
+*.pyc
+*.pyo
+.vscode/
+.env
+.claude/
+.venv
+*.pdf
+*moulinette*
+datasets*
+ex*
+output
+processed
