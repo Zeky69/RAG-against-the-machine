@@ -9,7 +9,7 @@ __pycache__/
 .venv
 *.pdf
 *moulinette*
-datasets*
+*.zip
 ex*
 output
 processed
