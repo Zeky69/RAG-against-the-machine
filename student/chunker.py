@@ -25,11 +25,14 @@ def _docs_to_chunks(file_path: str, docs: list) -> List[Chunk]:
     ]
 
 
+CHUNK_OVERLAP = 100
+
+
 def chunk_python(file_path: str, content: str, max_size: int) -> List[Chunk]:
     splitter = RecursiveCharacterTextSplitter.from_language(
         language=Language.PYTHON,
         chunk_size=max_size,
-        chunk_overlap=0,
+        chunk_overlap=CHUNK_OVERLAP,
         add_start_index=True,
     )
     return _docs_to_chunks(file_path, splitter.create_documents([content]))
@@ -38,7 +41,7 @@ def chunk_python(file_path: str, content: str, max_size: int) -> List[Chunk]:
 def chunk_text(file_path: str, content: str, max_size: int) -> List[Chunk]:
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=max_size,
-        chunk_overlap=0,
+        chunk_overlap=CHUNK_OVERLAP,
         add_start_index=True,
     )
     return _docs_to_chunks(file_path, splitter.create_documents([content]))
@@ -48,7 +51,7 @@ def chunk_markdown(file_path: str, content: str, max_size: int) -> List[Chunk]:
     splitter = RecursiveCharacterTextSplitter.from_language(
         language=Language.MARKDOWN,
         chunk_size=max_size,
-        chunk_overlap=0,
+        chunk_overlap=CHUNK_OVERLAP,
         add_start_index=True,
     )
     return _docs_to_chunks(file_path, splitter.create_documents([content]))

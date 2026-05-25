@@ -44,7 +44,14 @@ def build_index(repo_path: str, max_chunk_size: int = 2000) -> None:
     with open(CHUNKS_PATH / "chunks_meta.json", "w") as fp:
         json.dump(meta, fp)
 
-    corpus = [c.content for c in all_chunks]
+    repo_base = Path(repo_path)
+    corpus = []
+    for c in all_chunks:
+        try:
+            rel = Path(c.file_path).relative_to(repo_base).as_posix()
+        except ValueError:
+            rel = c.file_path
+        corpus.append(f"# {rel}\n{c.content}")
     with open(CHUNKS_PATH / "corpus.json", "w") as fp:
         json.dump(corpus, fp)
     tokenized = bm25s.tokenize(corpus, show_progress=False)

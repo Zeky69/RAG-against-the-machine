@@ -46,16 +46,16 @@ class RAGSystem:
             print(f"Error: failed to parse dataset {dataset_path}: {e}")
             return
         retriever = Retriever()
-        results: List[MinimalSearchResults] = []
-        for q in tqdm(dataset.rag_questions, desc="Searching"):
-            sources = retriever.search(query=q.question, k=k)
-            results.append(
-                MinimalSearchResults(
-                    question_id=q.question_id,
-                    question_str=q.question,
-                    retrieved_sources=sources,
-                )
+        questions = dataset.rag_questions
+        all_sources = retriever.search_batch([q.question for q in questions], k=k)
+        results: List[MinimalSearchResults] = [
+            MinimalSearchResults(
+                question_id=q.question_id,
+                question_str=q.question,
+                retrieved_sources=sources,
             )
+            for q, sources in zip(questions, all_sources)
+        ]
         out = StudentSearchResults(search_results=results, k=k)
         out_path = Path(save_directory)
         out_path.mkdir(parents=True, exist_ok=True)

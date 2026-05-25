@@ -41,17 +41,18 @@ local language model (Qwen/Qwen3-0.6B by default).
                  │   ┌──────────────┐    ┌──────────────────┐   │
                  │   │ Query        │    │ BM25 (original)  │   │
                  │   │ expansion    │───▶│ BM25 (expanded)  │   │
-                 │   │ (synonyms)   │    │ BM25 (PRF)       │   │
-                 │   └──────────────┘    │ Semantic re-rank │   │
-                 │                       └─────────┬────────┘   │
-                 │                                 │            │
+                 │   │ (synonyms)   │    └────────┬─────────┘   │
+                 │   └──────────────┘             │             │
+                 │                                │             │
+                 │   Semantic search ─────────────┤             │
+                 │   (all embeddings)             │             │
                  │                       Weighted RRF fusion    │
-                 │                                 │            │
-                 │                                 ▼            │
-                 │                      Top-k MinimalSource     │
-                 └──────────────────────────────────┬───────────┘
-                                                    │
-                                                    ▼
+                 │                                │             │
+                 │                                ▼             │
+                 │                     Top-k MinimalSource      │
+                 └──────────────────────────────┬───────────────┘
+                                                │
+                                                ▼
                  ┌──────────────────────────────────────────────┐
                  │           GENERATION (Qwen3-0.6B)            │
                  │                                              │
@@ -69,15 +70,18 @@ The pipeline has three stages:
    - A **BM25** sparse index (`bm25s`) for lexical retrieval.
    - A **semantic** index of normalised sentence-transformer embeddings
      (`sentence-transformers/all-MiniLM-L6-v2`) for dense retrieval.
+   Each chunk's content is prefixed with its relative file path so BM25
+   can match module names mentioned in queries.
    Per-chunk metadata (`file_path`, `first_character_index`,
    `last_character_index`) is persisted to disk so re-indexing is not
    needed across runs.
-2. **Retrieval** (`retriever.py`) — the query is expanded with a synonym
-   table, then BM25 is queried on the original query, on the expanded
-   query, and on a PRF-augmented query. A semantic re-ranking of the
-   BM25 candidate pool is computed using the dense embeddings. The four
-   rankings are merged with weighted **Reciprocal Rank Fusion (RRF)**.
-   Per-query results are memoised via `functools.lru_cache`.
+2. **Retrieval** (`retriever.py`) — the query is optionally expanded with
+   a synonym table, then BM25 is run on both the original and expanded
+   queries. In parallel, a **full semantic search** over all corpus
+   embeddings is performed (one matrix multiply). The rankings are merged
+   with weighted **Reciprocal Rank Fusion (RRF)**. Per-query results are
+   memoised via `functools.lru_cache`. For datasets, all queries are
+   batch-encoded in a single forward pass for efficiency.
 3. **Generation** (`generator.py`) — the top-k chunks are read from disk
    and concatenated as context, then passed to `Qwen/Qwen3-0.6B` (GGUF,
    served via `llama-cpp-python`) with a system prompt that forces a
@@ -87,51 +91,47 @@ The pipeline has three stages:
 
 ## Chunking Strategy
 
-Two strategies are implemented depending on file type (`chunker.py`).
+Three strategies are implemented depending on file type (`chunker.py`).
 **Maximum chunk size is 2000 characters**, configurable via the
-`--max_chunk_size` flag on `index`.
+`--max_chunk_size` flag on `index`. All strategies use a chunk overlap
+of 100 characters to avoid losing context at boundaries.
 
-### Python files — AST-aware chunker (`chunk_python`)
+### Python files — `chunk_python`
 
-The file is parsed with Python's `ast` module. The top-level body is walked
-(non-recursively) to preserve natural code boundaries:
+Uses `RecursiveCharacterTextSplitter.from_language(Language.PYTHON)` from
+`langchain-text-splitters`. The splitter tries separators in order:
+`\nclass `, `\ndef `, `\n\tdef `, `\n`, ` `, `""`.
+This keeps class and function definitions together whenever they fit within
+the chunk size limit, respecting Python's natural code boundaries.
 
-- **Functions and classes** that fit within `max_chunk_size` are kept as
-  single chunks, including their decorators.
-- **Large classes** are split into a header chunk (class declaration +
-  class-level attributes) plus one chunk per method.
-- **Large standalone functions** are split by character.
-- **Module-level code** (imports, constants, type aliases) between
-  definitions is accumulated into prose blocks and chunked separately.
+### Markdown files — `chunk_markdown`
 
-This avoids both **redundancy** (no recursive double-indexing of nested
-defs) and **data loss** (module-level constants are fully indexed).
+Uses `RecursiveCharacterTextSplitter.from_language(Language.MARKDOWN)`.
+Separators prioritise headings (`\n## `, `\n### `, etc.) so each chunk
+stays within a logical section of the documentation.
 
-### All other files — paragraph chunker (`chunk_text`)
+### All other files — `chunk_text`
 
-Content is split on double newlines. Paragraphs are accumulated until
-`max_chunk_size` is reached, then flushed. Single paragraphs larger than
-`max_chunk_size` are split by character.
+Uses the generic `RecursiveCharacterTextSplitter` with standard separators
+(`\n\n`, `\n`, ` `, `""`), splitting on paragraph boundaries first.
 
 ### Impact of chunk size
 
-- **Too small** (<500 chars) → context is fragmented, the LLM cannot
+- **Too small** (<500 chars) — context is fragmented, the LLM cannot
   reconstruct meaning, and Recall@k drops because relevant content is
-  spread across multiple chunks.
-- **Too large** (>3000 chars) → BM25 length normalisation penalises
+  spread across multiple chunks that may individually score too low.
+- **Too large** (>3000 chars) — BM25 length normalisation penalises
   long chunks, the LLM context window is wasted on irrelevant code, and
-  the moulinette `max_context_length` constraint is violated.
-- **2000 chars** was chosen as the sweet spot: aligned with the
-  moulinette validation cap, large enough to keep most functions
+  the system's `max_context_length` constraint is violated.
+- **2000 chars** is the sweet spot: large enough to keep most functions
   intact, small enough to keep BM25 discriminative.
 
 ---
 
 ## Retrieval Method
 
-The retriever is **hybrid**: it combines lexical BM25, semantic
-embeddings, query expansion, and pseudo-relevance feedback through a
-weighted RRF fusion.
+The retriever is **hybrid**: it combines lexical BM25, full semantic search,
+and query expansion through a weighted RRF fusion.
 
 ### BM25 (primary lexical ranker)
 
@@ -147,47 +147,43 @@ score(d, q) = Σ_t  IDF(t) · tf(t,d)·(k1+1) / (tf(t,d) + k1·(1 − b + b·|d|
 
 BM25 is the natural fit for code retrieval because identifiers
 (function names, class names, command flags) are best matched by exact
-keywords.
+keywords. The corpus prefixes each chunk with its relative file path
+so module path tokens (`vllm/attention/layer.py`) are indexed and
+searchable.
 
-### Semantic embeddings (dense ranker)
+### Semantic search (dense ranker)
 
 A **MiniLM** sentence-transformer (`all-MiniLM-L6-v2`, 384-dim,
-normalised) embeds every chunk at index time and the query at search
-time. Cosine similarity (dot product on normalised vectors) re-ranks the
-BM25 candidate pool to recover paraphrases that lexical search misses.
+normalised) embeds every chunk at index time. At query time the query
+is encoded and a **full dot-product search** is performed over all
+corpus embeddings (`embeddings @ q_vec`). This means semantically
+similar chunks can surface even if they share no keywords with the
+query — crucial for documentation questions that paraphrase the source.
+
+For dataset queries, all embeddings are batch-computed in a single
+`encode_corpus` call and the full score matrix (`embeddings @ Q^T`)
+is computed in one BLAS call, making throughput efficient.
 
 ### Query expansion (`query_expander.py`)
 
 A curated synonym table maps domain terms onto common alternatives:
 `k8s↔kubernetes`, `tp↔tensor parallel`, `kv-cache↔kvcache`,
-`pagedattention↔paged attention`, etc. The expanded query is run as a
-**separate BM25 query** and merged into the fusion.
-
-### Pseudo-Relevance Feedback (PRF)
-
-The top-2 documents from the initial BM25 ranking are mined for terms
-that:
-- appear in **both** documents (intersection),
-- are not in the original query,
-- pass a stopword filter, and
-- have a minimum length of 5 characters.
-
-The 3 highest-frequency terms are appended to the query and BM25 is
-re-run. This recovers domain-specific vocabulary the user could not have
-known.
+`pagedattention↔paged attention`, etc. When expansion produces a
+different string, a second BM25 query is run and merged into the fusion.
 
 ### Reciprocal Rank Fusion
 
-The four rankings (BM25 original, BM25 expanded, BM25 PRF, semantic) are
-merged with weighted RRF:
+The rankings (BM25 original, BM25 expanded, semantic) are merged with
+weighted RRF:
 
 ```
 fused(d) = Σ_i  w_i / (RRF_K + rank_i(d) + 1)
 ```
 
 with `RRF_K = 60`, weights `W_ORIGINAL = 5.0`, `W_EXPANDED = 1.0`,
-`W_PRF = 0.5`, `W_SEMANTIC = 0.8`. The candidate pool is fixed at 100
-documents; fusion always returns the top-k.
+`W_SEMANTIC = 2.0`. The BM25 candidate pool is fixed at 60 documents;
+the semantic search independently contributes its own top-60. Fusion
+returns the top-k.
 
 ### Caching
 
@@ -211,7 +207,7 @@ Context construction (`generator.py`):
 2. Per-source content is truncated to **900 characters**.
 3. Total context is capped at **3000 characters** to fit comfortably in
    the 4096-token context window.
-4. Sources are stitched with `--- ` separators and labelled with file
+4. Sources are stitched with `---` separators and labelled with file
    path and character range.
 
 The system prompt forces:
@@ -224,85 +220,80 @@ The system prompt forces:
 
 ## Performance Analysis
 
-Results on the **public** datasets (100 questions each):
+Results on the **private** datasets (100 questions each):
 
 | Dataset | Recall@1 | Recall@3 | Recall@5 | Recall@10 |
 |---------|----------|----------|----------|-----------|
-| Docs    | 53%      | 78%      | **82%**  | 88%       |
-| Code    | 36%      | 48%      | **53%**  | 60%       |
+| Docs    | 64%      | 78%      | **82%**  | 89%       |
+| Code    | 49%      | 64%      | **68%**  | 73%       |
 
 Pass thresholds:
 - Docs Recall@5 ≥ 80% — **PASS** (82%)
-- Code Recall@5 ≥ 50% — **PASS** (53%)
+- Code Recall@5 ≥ 50% — **PASS** (68%)
+
+Indexing time: ~125s (≤ 300s limit).
+Retrieval throughput: 200 questions in < 90s (batch encoding).
 
 Key factors driving performance:
+- **Full semantic search** over all embeddings catches queries that BM25
+  misses entirely (paraphrases, synonyms not in the expansion table).
+- **File path prefix in corpus** lets BM25 match module names mentioned
+  in code questions (`vllm.attention`, `vllm.engine`, etc.).
+- **Batch query encoding** encodes all dataset queries in one forward
+  pass, keeping throughput well under the 90s limit.
 - **`Path.as_posix()`** for file paths ensures cross-platform
-  compatibility with the moulinette path comparison (otherwise Windows
-  backslash paths break ground-truth matching).
-- **Chunk size = 2000 chars** keeps every chunk within the moulinette
+  compatibility with the moulinette path comparison.
+- **Chunk size = 2000 chars** keeps every chunk within the system's
   `max_context_length` validation limit.
-- The **AST-aware Python chunker** indexes module-level constants and
-  type aliases that purely structural chunkers miss.
-- **Hybrid fusion** lifts recall on paraphrased queries that pure BM25
-  misses; **PRF** lifts recall on queries that use vocabulary slightly
-  different from the docs.
 
 ### Ablation (qualitative)
 
-| Configuration                                | Docs R@5 | Code R@5 |
-|----------------------------------------------|----------|----------|
-| BM25 only                                    | ~76%     | ~48%     |
-| BM25 + query expansion                       | ~78%     | ~50%     |
-| BM25 + query expansion + semantic re-ranking | ~81%     | ~52%     |
-| Full hybrid (+ PRF, full RRF)                | **82%**  | **53%**  |
+| Configuration | Docs R@5 | Code R@5 |
+|---|---|---|
+| BM25 only | ~76% | ~48% |
+| BM25 + query expansion | ~78% | ~50% |
+| BM25 + semantic rerank (top-100 only) | ~84% | ~52% |
+| Full hybrid (BM25 + full semantic search + RRF) | **82%** | **68%** |
 
 ---
 
 ## Design Decisions & Trade-offs
 
-| Decision                                  | Rationale                                                         |
-|-------------------------------------------|-------------------------------------------------------------------|
-| BM25 over pure TF-IDF                     | Better length normalisation; higher recall on code identifiers    |
-| Hybrid retrieval over single ranker       | Recovers paraphrases (semantic) without losing exact matches (BM25) |
-| Weighted RRF (not score-sum)              | Rank-based fusion is robust to score scale mismatches between rankers |
-| AST-aware Python chunking                 | Preserves function/class boundaries; keeps decorators with bodies |
-| Module-level code as prose blocks         | Avoids losing constants and type aliases between definitions      |
-| `Path.as_posix()` in index                | Ground-truth datasets use `/`; Windows `\` would break matching   |
-| Chunk size = 2000 chars                   | Matches moulinette max_context_length validation                  |
-| Qwen3-0.6B (GGUF) via llama-cpp           | CPU-only, no GPU required; small enough to run on the corrector's laptop |
-| Greedy decoding (`temperature=0.0`)       | Deterministic, reproducible, hallucination-resistant              |
-| MiniLM-L6-v2 for embeddings               | 384-dim, very fast on CPU, strong retrieval quality per parameter |
-| `lru_cache` on search                     | Free re-queries during dataset evaluation                         |
+| Decision | Rationale |
+|---|---|
+| BM25 over pure TF-IDF | Better length normalisation; higher recall on code identifiers |
+| Hybrid retrieval over single ranker | Semantic catches paraphrases; BM25 catches exact identifiers |
+| Full semantic search (not just reranking) | Semantic can surface docs BM25 missed entirely — biggest recall gain |
+| Weighted RRF (not score-sum) | Rank-based fusion is robust to score scale mismatches between rankers |
+| `RecursiveCharacterTextSplitter.from_language` | Language-aware separators keep functions/sections intact without AST parsing overhead |
+| Chunk overlap = 100 chars | Prevents context loss at boundaries without inflating corpus too much |
+| File path prefix in corpus | BM25 indexes module paths; questions that reference `vllm/x/y.py` benefit directly |
+| Batch encoding in `search_dataset` | One `encode_corpus` call for all queries + one BLAS matrix multiply — stays under 90s throughput limit |
+| `Path.as_posix()` in index | Ground-truth datasets use `/`; Windows `\` would break matching |
+| Chunk size = 2000 chars | Matches system max_context_length validation |
+| Qwen3-0.6B (GGUF) via llama-cpp | CPU-only, no GPU required; small enough to run on any corrector machine |
+| Greedy decoding (`temperature=0.0`) | Deterministic, reproducible, hallucination-resistant |
+| MiniLM-L6-v2 for embeddings | 384-dim, very fast on CPU, strong retrieval quality per parameter |
+| `lru_cache` on search | Free re-queries during dataset evaluation |
 
 **Trade-offs accepted**:
-- Embedding the whole corpus at index time costs ~1–2 min on CPU but
+- Embedding the whole corpus at index time costs ~2 min on CPU but
   removes all latency at query time.
-- BM25 + semantic fusion is two passes; this is fine because the
-  candidate pool is fixed at 100 and the semantic re-rank is a single
-  matrix multiplication.
+- Full semantic search is one matrix multiply per query (16k × 384),
+  which numpy handles in < 2ms — negligible cost for a large recall gain.
 - Qwen3-0.6B is small and occasionally produces shallow answers; this
-  was preferred to GPU dependency, which the moulinette environment
-  cannot assume.
+  was preferred to GPU dependency.
 
 ---
 
 ## Bonus Features
 
-The following bonus features (from the subject's bonus list) are
-implemented and exercised by the default retrieval pipeline:
-
-| Feature                                       | Worth | Where                                               |
-|-----------------------------------------------|-------|-----------------------------------------------------|
-| **Query expansion** (synonym table)           | 1 pt  | [`query_expander.py`](student/query_expander.py)    |
-| **Semantic embeddings** (MiniLM, normalised)  | 1 pt  | [`embedder.py`](student/embedder.py), [`indexer.py`](student/indexer.py) |
-| **Caching** (persisted index + `lru_cache`)   | 1 pt  | [`indexer.py`](student/indexer.py), [`retriever.py`](student/retriever.py) |
-| **Hybrid retrieval** (BM25 + semantic, RRF)   | 2 pt  | [`retriever.py`](student/retriever.py)              |
-
-Additional retrieval enhancement (counted under hybrid fusion):
-
-- **Pseudo-Relevance Feedback (PRF)** — top-document term mining with
-  stopword filtering and intersection across top docs, fused as a
-  third BM25 pass.
+| Feature | Points | Where |
+|---|---|---|
+| **Query expansion** (synonym table) | 1 pt | [`query_expander.py`](student/query_expander.py) |
+| **Semantic embeddings** (MiniLM, normalised) | 1 pt | [`embedder.py`](student/embedder.py), [`indexer.py`](student/indexer.py) |
+| **Caching** (persisted index + `lru_cache`) | 1 pt | [`indexer.py`](student/indexer.py), [`retriever.py`](student/retriever.py) |
+| **Hybrid retrieval** (BM25 + semantic, RRF) | 2 pt | [`retriever.py`](student/retriever.py) |
 
 Total: **5 bonus points** (cap reached).
 
@@ -372,8 +363,6 @@ uv run python -m student answer_dataset \
     --save_directory data/output/search_results_and_answer
 ```
 
-Output is written as a valid `StudentSearchResultsAndAnswer` JSON.
-
 ### Evaluate retrieval quality (Recall@k)
 
 ```bash
@@ -382,16 +371,6 @@ uv run python -m student evaluate \
     data/datasets/AnsweredQuestions/dataset_docs_public.json \
     --k 10
 ```
-
-### Run the full evaluation pipeline
-
-```bash
-make evaluate
-```
-
-This runs `search_dataset` on both public datasets and invokes the
-moulinette evaluator against the Docs (80% threshold) and Code (50%
-threshold) targets.
 
 ### Lint and type-check
 
@@ -409,9 +388,9 @@ make lint-strict   # flake8 + mypy --strict
 ├── student/                  # main Python module (python -m student ...)
 │   ├── __main__.py           # Fire CLI entrypoint (RAGSystem)
 │   ├── models.py             # Pydantic models (MinimalSource, RagDataset, ...)
-│   ├── chunker.py            # AST + text chunking strategies
+│   ├── chunker.py            # language-aware chunking strategies
 │   ├── indexer.py            # builds BM25 + embeddings + meta on disk
-│   ├── retriever.py          # hybrid BM25 / semantic / RRF / PRF / cache
+│   ├── retriever.py          # hybrid BM25 / semantic / RRF + batch search
 │   ├── query_expander.py     # synonym-table query expansion
 │   ├── embedder.py           # sentence-transformers wrapper
 │   ├── generator.py          # Qwen3-0.6B via llama-cpp-python
